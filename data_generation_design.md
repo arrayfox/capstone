@@ -263,16 +263,40 @@ TICK_SECONDS     = 1      # wake each real second, advance 60 sim-seconds, fire 
 
 ---
 
-## 11. Store → stream path (per live run)
+## 11. Store → poll path (no streaming)
+
+The generator's **only** job is to write runs to SQLite. The dashboard **polls**
+FastAPI on a timer and re-renders. SQLite is the single source of truth; there is
+**no SSE / WebSocket** and the generator never talks to the UI directly.
 
 ```
-generate ──► INSERT (SQLite, derive duration_minutes + run_date) ──► notify ──► SSE event ──► dashboard appends row
+  generator ──INSERT──► SQLite (monitor.db) ◄──SELECT── FastAPI ◄──poll every N sec── Dashboard
+   (live runs)          = source of truth        REST                                (auto-refresh
+                             │                                                         last N rows + KPIs)
+                       retention: keep ~RETENTION_DAYS, drop oldest
 ```
 
-1. INSERT the run into `pipeline_executions`.
-2. Notify the API layer (in-process event/queue) that a new run landed.
-3. Push it over an open **SSE** connection (`GET /stream`) to the dashboard.
-4. Dashboard appends to the live feed — no polling.
+Per live run: **INSERT** the row into `pipeline_executions` (deriving
+`duration_minutes` + `run_date` on write). That's it — nothing is pushed. The next
+dashboard poll picks it up.
+
+### Dashboard reads (polling)
+```
+GET /runs/recent?limit=50        → newest executions   (table auto-refreshes ~POLL_SECONDS)
+GET /kpis?window=7d              → health cards        (same timer)
+GET /runs?pipeline=...&limit=... → history / charts    (on demand)
+GET /violations?reviewed=false   → review panel
+POST /violations/42/review       → human action (approve / dismiss / escalate)
+```
+The frontend uses a simple `setInterval` (~`POLL_SECONDS`) to re-fetch `/runs/recent`
+and `/kpis`. At compressed sim-time new rows land every few seconds, so a 5–10 s
+refresh makes the table visibly move — "live enough" without streaming machinery.
+
+**Why polling (not SSE/WebSocket):** the run is *stored*, not *streamed*. Every
+dashboard read hits the **DB via FastAPI**, so no long-lived connection, no push
+plumbing, no reconnection logic. It's self-healing: reload the page or drop the
+network, and the next poll just re-fetches current state. WebSocket's two-way channel
+would be unused weight since the dashboard never sends data back up a stream.
 
 ### Concurrency (WAL)
 While the generator writes, KPI queries, the detector, and chart queries **read the
@@ -292,7 +316,30 @@ multi-process-safe).
 
 ---
 
-## 12. Tunable knobs (one place)
+## 12. Retention (bounded storage — keep ~2 months)
+
+We don't store runs indefinitely. A periodic prune keeps the DB bounded to a rolling
+window (default **60 days**), dropping the oldest executions:
+
+```sql
+DELETE FROM pipeline_executions
+WHERE scheduled_time < (sim_now − RETENTION_DAYS);   -- e.g. 60 days
+```
+
+**Two refinements:**
+1. **When to prune — once per simulated day** (not on every insert). Cheap, natural,
+   and driven by the compressed **sim-clock** so it stays consistent with generation.
+2. **What to prune —** `pipeline_executions` (and old, already-reviewed `violations`)
+   follow the 60-day window. **`audit_log` is exempt** — it's the governance /
+   compliance trail, is tiny, and must persist.
+
+**Consistency rule:** `RETENTION_DAYS` must be **≥ the longest analysis window**. We
+use 30-day trends and ~20-run volume baselines, so 60 days covers both comfortably —
+no detection breaks when old rows drop.
+
+---
+
+## 13. Tunable knobs (one place)
 
 ```python
 # --- anomaly base rates (per run, × fragility) ---
@@ -309,12 +356,13 @@ DIP_FACTOR    = (0.2, 0.4)
 SPIKE_FACTOR  = (2.0, 3.0)
 
 # --- simulation ---
-BACKFILL_DAYS    = 30
-TIME_COMPRESSION = 60
-TICK_SECONDS     = 1
+BACKFILL_DAYS    = 30     # seed history at startup
+RETENTION_DAYS   = 60     # keep ~2 months; prune older (must be ≥ analysis windows)
+TIME_COMPRESSION = 60     # sim-seconds per real-second
+TICK_SECONDS     = 1      # live loop wake interval (backend)
+POLL_SECONDS     = 5      # dashboard auto-refresh cadence (frontend)
 SEED             = 42
 ```
 
-Turn these dials to make the fleet healthier or more chaotic — no code changes.
-
----
+Turn these dials to make the fleet healthier or more chaotic, faster or slower — no
+code changes.
