@@ -1,49 +1,4 @@
-# Synthetic Data Schema Design (v3 — lean)
 ## Capstone Project: Data Freshness Monitoring & Insights Agent
-
-> **v3 = the trimmed model** we agreed on for the 3-4 day build. It still powers
-> every project requirement, with ~40% fewer fields than v2.
->
-> **Guiding principle:** the simulator emits only **raw facts**. Anything
-> derivable (`duration_minutes`, `run_date`) is computed **at ingest** and stored.
-> Anything learnable (volume baselines) is computed **from history** by the agent —
-> not hardcoded in config.
->
-> **Changed from v2 → v3**
-> - **Dropped from the log:** `rows_failed`, `triggered_by`, `environment`
->   (decorative / not core), and `pipeline_category` (moved to config where it
->   belongs).
-> - **`run_date` & `duration_minutes`:** no longer *emitted* — derived at ingest.
-> - **Dropped from config:** `expected_frequency` (redundant with
->   `schedule_interval_minutes`), `sla_deadline` (absolute time), `max_duration_minutes`
->   (overlapped with SLA), and all `expected_rows_min/max/avg`.
-> - **Volume baseline is now learned from history** (last N runs), not stored.
-> - **SLA simplified to ONE rule:** `end_time > scheduled_time + sla_minutes`.
-> - **`violations`** slimmed to an append-only event log; pipeline state / KPIs are
->   computed at query time.
-
----
-
-## How Requirements Map to Data
-
-| Project Requirement | What Powers It |
-|---------------------|----------------|
-| Detect freshness violations | last successful `end_time` + `freshness_threshold_hours` |
-| Identify delayed loads | `scheduled_time` vs `actual_start_time` |
-| Identify missing loads | no run within `schedule_interval_minutes` window |
-| Analyze historical patterns | `duration_minutes` over time per pipeline |
-| Recognize recurring issues | `error_code` repeated over time |
-| SLA compliance | `end_time` vs (`scheduled_time` + `sla_minutes`) |
-| Volume anomalies | `rows_processed` vs **learned** rolling baseline |
-| Trend analysis | `duration_minutes` + `failure_rate` over weeks |
-| Historical comparisons | `run_date` grouping (7d vs 30d) |
-| Executive summaries (LLM) | aggregated KPIs + active violations |
-| Root-cause indicators | `error_code`, `error_message` patterns |
-| Human-in-the-loop | `is_reviewed`, `reviewer_action` in `violations` |
-| Audit logs | `audit_log` table |
-| Dashboard health cards | KPIs (`success_rate`, `sla_rate`, `freshness_rate`, `health_score`) |
-
----
 
 ## Table 1: `pipeline_executions` (raw log — the ONLY thing the simulator emits)
 
@@ -99,15 +54,6 @@ deadline   = scheduled_time + sla_minutes
 sla_missed = end_time > deadline          # FAILED or MISSING runs = auto-missed
 breach_min = max(0, end_time - deadline)  # how late, in minutes
 ```
-
-Example — `scheduled_time = 06:00`, `sla_minutes = 120` → **deadline 08:00**:
-
-| Run | end_time | Result |
-|---|---|---|
-| A | 07:45 | ✅ met (15 min spare) |
-| B | 08:30 | ❌ missed by 30 min |
-| C | FAILED | ❌ missed (no data delivered) |
-| D | never ran | ❌ missed (missing load) |
 
 Works for every cadence (hourly / daily / 15-min) — no absolute deadline needed.
 
@@ -175,7 +121,7 @@ Example:
 
 | log_id | event_type | triggered_by | entity_id | summary | timestamp |
 |---|---|---|---|---|---|
-| 1 | `REPORT_GENERATED` | `AGENT` | `report_2026-08-07` | Weekly exec summary, 10 pipelines | 2026-08-07 08:00 |
+| 1 | `REPORT_GENERATED` | `AGENT` | `report_2026-08-07` | Weekly exec summary, 7 pipelines | 2026-08-07 08:00 |
 | 2 | `FINDING_APPROVED` | `USER` | `violation_42` | Confirmed SLA breach on prescriber sync | 2026-08-07 09:15 |
 | 3 | `FINDING_DISMISSED` | `USER` | `violation_43` | Volume dip — known holiday | 2026-08-07 09:20 |
 
@@ -195,17 +141,25 @@ Rolling window (e.g. last 24h / 7d of sim-time):
 
 ## What to Send to Gemini (LLM context — NOT raw rows)
 
-> A compact structured summary keeps it fast, cheap, and focused.
+> A compact **structured** summary keeps it fast, cheap, and focused.
+>
+> **Rule of thumb:** send **raw numbers** and let the LLM write the prose. Keep a
+> code-built string only for a **precise fact** you want stated verbatim (e.g. each
+> violation's `detail`). Don't pre-format trends into sentences — send the numbers.
 
 ```json
 {
-  "period": "Aug 1 - Aug 7, 2026",
-  "total_pipelines": 10,
+  "period": { "start": "2026-08-01", "end": "2026-08-07", "days": 7 },
+  "total_pipelines": 7,
   "total_runs": 68,
-  "health_score": 74,
-  "overall_success_rate": "78%",
-  "sla_compliance_rate": "71%",
-  "freshness_compliance_rate": "80%",
+
+  "kpis": {
+    "health_score": 74,
+    "success_rate_pct": 78,
+    "sla_compliance_pct": 71,
+    "freshness_compliance_pct": 80,
+    "failure_count": 15
+  },
 
   "active_violations": [
     {
@@ -213,40 +167,57 @@ Rolling window (e.g. last 24h / 7d of sim-time):
       "category": "CRM",
       "criticality": "HIGH",
       "violation_type": "SLA_BREACH",
-      "detail": "Finished 135 min after its 120-min SLA.",
-      "occurrences_this_week": 3
+      "occurrences_this_week": 3,
+      "detail": "Finished 135 min after its 120-min SLA."
     },
     {
       "pipeline": "rx_claims_daily_load",
       "category": "Claims",
       "criticality": "HIGH",
       "violation_type": "MISSING_LOAD",
+      "occurrences_this_week": 1,
       "detail": "No successful run in 38 hours (threshold 24h)."
     },
     {
-      "pipeline": "formulary_compliance_update",
+      "pipeline": "sample_distribution_compliance",
       "category": "Compliance",
-      "criticality": "MEDIUM",
+      "criticality": "HIGH",
       "violation_type": "RECURRING_FAILURE",
-      "detail": "Failed 4 times this week with DB_TIMEOUT.",
-      "error_code": "DB_TIMEOUT"
+      "error_code": "DB_TIMEOUT",
+      "occurrences_this_week": 4,
+      "detail": "Failed 4 times this week with DB_TIMEOUT."
     }
   ],
 
   "performance_trends": {
     "pipelines_getting_slower": [
-      { "pipeline": "patient_segmentation_refresh", "avg_7d": "52m", "avg_30d": "28m", "change": "+85%" }
+      {
+        "pipeline": "patient_adherence_refresh",
+        "avg_duration_7d_min": 52,
+        "avg_duration_30d_min": 28,
+        "change_pct": 85
+      }
     ],
-    "failure_rate_trend": "12% → 22% over last 7 days"
+    "failure_rate": {
+      "previous_week_pct": 12,
+      "current_week_pct": 22,
+      "direction": "increasing",
+      "window_days": 7
+    }
   },
 
   "pipeline_descriptions": {
-    "hcp_prescriber_data_sync": "Syncs healthcare professional prescribing data from CRM",
-    "rx_claims_daily_load": "Daily load of prescription claims from payer feeds"
+    "hcp_prescriber_data_sync": "Syncs HCP prescriber profiles & prescribing activity from Veeva CRM",
+    "rx_claims_daily_load": "Daily retail-pharmacy prescription claims from IQVIA / payer feeds",
+    "sample_distribution_compliance": "Drug-sample distribution tracking for PDMA compliance"
   }
 }
 ```
 
+> **Every number above is computed by code** (queries over `pipeline_executions` +
+> `violations`) — nothing is hand-typed. Only the sentence-level `detail` is a
+> code-built template; the LLM turns the numbers into prose.
+>
 > Gemini returns: executive summary, root-cause indicators, risk assessment, and
 > recommended actions.
 
@@ -268,14 +239,3 @@ Rolling window (e.g. last 24h / 7d of sim-time):
 | **Human Review Panel** | violations where `is_reviewed = False` → approve / dismiss / escalate |
 
 ---
-
-## Summary: the minimum the simulator emits
-
-```
-run_id, pipeline_name, scheduled_time, actual_start_time,
-end_time, status, rows_processed, error_code, error_message
-```
-
-Ingest derives `duration_minutes` + `run_date`. `pipeline_config` supplies the
-SLA / freshness / schedule thresholds. Everything else — violations, freshness,
-trends, volume baselines, KPIs — is **computed by the agent**.

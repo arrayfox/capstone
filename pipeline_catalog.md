@@ -4,8 +4,6 @@
 A fleet of **7 pharma commercial-analytics pipelines**, chosen for variety across
 **category**, **cadence** (hourly → daily), and **criticality**.
 
-> Source of truth in code: [`synthetic_data/catalog.py`](synthetic_data/catalog.py)
-
 ---
 
 ## Table A — `pipeline_config` (the 8 fields stored in the DB)
@@ -46,10 +44,6 @@ pipelines exercise freshness/SLA logic over longer windows.
 | `patient_adherence_refresh` | 70 ± 18 | 900k ± 120k | 1.1 | 80 min |
 | `digital_engagement_etl` | 50 ± 20 | 250k ± 60k | 1.5 | 70 min |
 
-*\*fragility = multiplier on anomaly probability. Flaky 3rd-party-API pipelines
-(`digital_engagement_etl`) are higher; tightly-controlled compliance pipelines
-(`sample_distribution_compliance`) are lower.*
-
 ---
 
 ## Table C — Error codes by category
@@ -67,12 +61,3 @@ pipelines exercise freshness/SLA logic over longer windows.
 | Marketing | `RATE_LIMIT`, `HTTP_503`, `TOKEN_EXPIRED` |
 
 ---
-
-## Notes
-
-- **Config vs generator params** are deliberately separated (`Pipeline.db_config()`
-  returns only Table A). This keeps volume-anomaly detection honest — the agent
-  discovers baselines from observed history rather than reading them.
-- To change the fleet, edit `synthetic_data/catalog.py` and re-run it
-  (`python synthetic_data/catalog.py`) to print the distribution + SLA-headroom
-  sanity check.
