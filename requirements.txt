@@ -1,0 +1,13 @@
+# Install into a virtual environment:
+#
+#   Linux/macOS:
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements.txt
+#
+#   Windows (PowerShell):
+#     python -m venv .venv
+#     .venv\Scripts\pip install -r requirements.txt
+# -----------------------------------------------------------------------------
+fastapi>=0.141,<1.0
+pydantic>=2.13,<3.0
+uvicorn[standard]>=0.52,<1.0

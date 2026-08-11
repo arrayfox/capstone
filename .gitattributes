@@ -1,0 +1,60 @@
+# Normalize all text files to LF in the repository and on checkout.
+# Forcing eol=lf (instead of relying on core.autocrlf) means a Windows
+# clone gets the exact same bytes as this Linux dev environment, so no
+# "whole file changed" diffs and no CRLF surprises for the toolchain.
+* text=auto eol=lf
+
+# --- Source & config: keep LF everywhere ---
+*.py    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.jsonc text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.txt   text eol=lf
+*.svg   text eol=lf
+*.env   text eol=lf
+
+# Jupyter notebooks are JSON; keep them LF and let GitHub render them.
+*.ipynb text eol=lf
+
+# --- Shell scripts must stay LF (they break with CRLF) ---
+*.sh    text eol=lf
+
+# --- Windows scripts must stay CRLF (they can break with LF) ---
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# --- Binary files: never apply text/eol processing ---
+# Critical: the SQLite DBs must be byte-exact or they corrupt on Windows.
+*.db      binary
+*.sqlite  binary
+*.sqlite3 binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.webp    binary
+*.pdf     binary
+*.zip     binary
+*.gz      binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.eot     binary
+
+# --- GitHub niceties (diff/language stats) ---
+# Collapse generated files in PR diffs and exclude from language stats.
+frontend/package-lock.json linguist-generated=true
+data/*.db                  linguist-generated=true
