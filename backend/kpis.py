@@ -3,7 +3,7 @@ kpis.py - dashboard aggregate metrics.
 
 Pure read-only SELECTs over the ATTACHed DBs (monitor + config + governance).
 Everything is scoped to a rolling window (default 7 days) measured from the
-newest scheduled_time in the data ("data now"), so numbers stay stable when the
+newest timestamp in the data ("data now"), so numbers stay stable when the
 simulator is paused.
 
 Exposes:
@@ -21,7 +21,20 @@ _TS = "%Y-%m-%d %H:%M:%S"
 
 
 def _data_now() -> datetime:
-    row = db.fetch_one("SELECT MAX(scheduled_time) AS m FROM monitor.pipeline_executions")
+    # "Data now" is the newest moment represented in the dataset. We take the
+    # greatest of MAX(scheduled_time) and MAX(end_time): a run scheduled at T
+    # finishes at T + duration, so end_time is usually the real high-water mark.
+    # Anchoring on scheduled_time alone understates "now" and can make a run that
+    # JUST finished look like it completed in the future (negative freshness).
+    row = db.fetch_one(
+        """
+        SELECT MAX(m) AS m FROM (
+            SELECT MAX(scheduled_time) AS m FROM monitor.pipeline_executions
+            UNION ALL
+            SELECT MAX(end_time)       AS m FROM monitor.pipeline_executions
+        )
+        """
+    )
     return datetime.strptime(row["m"], _TS) if row and row["m"] else datetime.now()
 
 
@@ -151,9 +164,11 @@ def get_pipeline_health(window_days: int = 7) -> list[dict]:
         last_success = r["last_success"]
         stale_h = None
         if last_success:
-            stale_h = round(
+            # Clamp at 0: a run that succeeded at/after the data horizon is
+            # maximally fresh ("just now"), never a negative "hours ago".
+            stale_h = max(0.0, round(
                 (data_now - datetime.strptime(last_success, _TS)).total_seconds() / 3600.0, 1
-            )
+            ))
         is_fresh = (stale_h is not None) and (stale_h <= r["freshness_threshold_hours"])
         open_n = open_counts.get(r["pipeline_name"], 0)
 
@@ -251,7 +266,15 @@ def get_violation_stats(
     conds = ["1=1"]
     params: list = []
     if window_days:
-        conds.append("v.detected_at >= ?"); params.append(_window_start(window_days))
+        # Bound BOTH ends of the rolling window to "data now" (the newest run's
+        # scheduled_time). Without the upper bound, violations detected after the
+        # newest run (e.g. stale rows from an earlier session) would leak in and
+        # inflate the counts far beyond the selected timeframe.
+        data_now = _data_now()
+        conds.append("v.detected_at >= ?")
+        params.append((data_now - timedelta(days=window_days)).strftime(_TS))
+        conds.append("v.detected_at <= ?")
+        params.append(data_now.strftime("%Y-%m-%d") + " 23:59:59")
     if date_from:
         conds.append("v.detected_at >= ?"); params.append(date_from)
     if date_to:
@@ -300,10 +323,17 @@ def get_violation_trends(
     One row per calendar day in-window with the number of violations detected
     that day. Unlike get_violation_stats this DOES honor type/severity/status,
     because the trend chart is meant to reflect exactly what the table shows.
+
+    The window is bounded on BOTH ends relative to "data now" (the newest run's
+    scheduled_time): a lower bound of data_now - window_days and an upper bound
+    of data_now. Bounding the top end is what keeps a "7 days" selection from
+    spilling into later-dated violations left over from a previous session.
     """
-    since = _window_start(window_days)
-    conds = ["v.detected_at >= ?"]
-    params: list = [since]
+    data_now = _data_now()
+    since = (data_now - timedelta(days=window_days)).strftime(_TS)
+    until = data_now.strftime("%Y-%m-%d") + " 23:59:59"
+    conds = ["v.detected_at >= ?", "v.detected_at <= ?"]
+    params: list = [since, until]
     if pipeline and pipeline.lower() != "all":
         conds.append("v.pipeline_name = ?"); params.append(pipeline)
     if category and category.lower() != "all":
